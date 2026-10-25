@@ -2,12 +2,12 @@ services:
   - type: web
     name: printguard-ai
     runtime: node
-    buildCommand: npm install && npm run build
+    buildCommand: npm install --include=dev && npm run build
     startCommand: npm start
     envVars:
       - key: NODE_ENV
         value: production
       - key: NODE_VERSION
-        value: 22.14.0
+        value: 22
       - key: GEMINI_API_KEY
         sync: false

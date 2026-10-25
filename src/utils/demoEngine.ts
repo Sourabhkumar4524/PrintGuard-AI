@@ -1,5 +1,3 @@
-import normalBedImg from '../assets/images/fdm_print_normal_bed_1792870180710.jpg';
-import defectSpaghettiImg from '../assets/images/fdm_print_defect_spaghetti_1792870179217.jpg';
 import {
   AlertEvent,
   BoundingBox,
@@ -7,9 +5,67 @@ import {
   VisionDetectionResult,
 } from '../types/printguard';
 
+const bundledSampleImages = import.meta.glob<string>(
+  '../assets/images/*.{jpg,jpeg,png,webp}',
+  {
+    eager: true,
+    import: 'default',
+  }
+);
+
+function buildFallbackBedDataUri(variant: 'normal' | 'defect'): string {
+  const svg =
+    variant === 'normal'
+      ? `<svg xmlns="http://www.w3.org/2000/svg" width="960" height="540" viewBox="0 0 960 540">
+          <defs>
+            <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stop-color="#0b1220"/>
+              <stop offset="100%" stop-color="#070b14"/>
+            </linearGradient>
+          </defs>
+          <rect width="960" height="540" fill="url(#bg)"/>
+          <polygon points="180,430 780,430 680,310 280,310" fill="#111827" stroke="#334155" stroke-width="2"/>
+          <line x1="230" y1="370" x2="730" y2="370" stroke="#1e293b" stroke-width="1.5"/>
+          <line x1="480" y1="310" x2="480" y2="430" stroke="#1e293b" stroke-width="1.5"/>
+          <rect x="375" y="250" width="210" height="115" rx="6" fill="#0ea5e9" fill-opacity="0.22" stroke="#38bdf8" stroke-width="2.5"/>
+          <line x1="382" y1="275" x2="578" y2="275" stroke="#38bdf8" stroke-opacity="0.45" stroke-width="2"/>
+          <line x1="382" y1="300" x2="578" y2="300" stroke="#38bdf8" stroke-opacity="0.45" stroke-width="2"/>
+          <line x1="382" y1="325" x2="578" y2="325" stroke="#38bdf8" stroke-opacity="0.45" stroke-width="2"/>
+          <rect x="458" y="95" width="44" height="110" rx="4" fill="#1e293b" stroke="#64748b" stroke-width="2"/>
+          <polygon points="468,205 492,205 483,248 477,248" fill="#f59e0b"/>
+          <text x="36" y="46" fill="#94a3b8" font-family="monospace" font-size="16">CHAMBER CAM 01 // PLA 210C // CLEAN ADHESION</text>
+        </svg>`
+      : `<svg xmlns="http://www.w3.org/2000/svg" width="960" height="540" viewBox="0 0 960 540">
+          <defs>
+            <linearGradient id="bgd" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stop-color="#140c14"/>
+              <stop offset="100%" stop-color="#070b14"/>
+            </linearGradient>
+          </defs>
+          <rect width="960" height="540" fill="url(#bgd)"/>
+          <polygon points="180,430 780,430 680,310 280,310" fill="#111827" stroke="#334155" stroke-width="2"/>
+          <rect x="375" y="295" width="210" height="70" rx="4" fill="#ef4444" fill-opacity="0.16" stroke="#f87171" stroke-width="2"/>
+          <path d="M360,260 C410,190 540,320 490,220 C440,150 610,270 560,210 C510,170 400,295 595,265" fill="none" stroke="#fb7185" stroke-width="4" stroke-linecap="round"/>
+          <path d="M395,280 C455,205 520,305 570,235 C620,195 430,245 470,295" fill="none" stroke="#fda4af" stroke-width="2.5" stroke-linecap="round"/>
+          <rect x="458" y="85" width="44" height="105" rx="4" fill="#1e293b" stroke="#64748b" stroke-width="2"/>
+          <polygon points="468,190 492,190 483,230 477,230" fill="#ef4444"/>
+          <text x="36" y="46" fill="#fca5a5" font-family="monospace" font-size="16">CHAMBER CAM 01 // SPAGHETTI EXTRUSION ANOMALY</text>
+        </svg>`;
+  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+}
+
+function resolveSampleImage(keyword: string, variant: 'normal' | 'defect'): string {
+  for (const [assetPath, resolvedUrl] of Object.entries(bundledSampleImages)) {
+    if (assetPath.toLowerCase().includes(keyword)) {
+      return resolvedUrl;
+    }
+  }
+  return buildFallbackBedDataUri(variant);
+}
+
 export const DEMO_SAMPLE_IMAGES = {
-  normal: normalBedImg,
-  defect: defectSpaghettiImg,
+  normal: resolveSampleImage('normal', 'normal'),
+  defect: resolveSampleImage('defect', 'defect'),
 };
 
 /**
