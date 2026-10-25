@@ -2,8 +2,8 @@ services:
   - type: web
     name: printguard-ai
     runtime: node
-    buildCommand: npm install --include=dev --legacy-peer-deps && npm run build
-    startCommand: npm start
+    buildCommand: npm install --include=dev --legacy-peer-deps && npm install react-is --no-save --legacy-peer-deps && npm run build
+    startCommand: npx tsx server.ts
     envVars:
       - key: NODE_ENV
         value: production

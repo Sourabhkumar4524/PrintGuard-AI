@@ -1,6 +1,6 @@
 import 'dotenv/config';
 import cors from 'cors';
-import express, { Request, Response } from 'express';
+import express, { type Request, type Response } from 'express';
 import fs from 'fs';
 import http from 'http';
 import multer from 'multer';
