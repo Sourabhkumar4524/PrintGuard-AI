@@ -1,0 +1,6 @@
+{
+  "summary":  "Implementation plan for PrintGuard AI, a frontend-only React + TypeScript 3D-printing IoT & AI defect monitoring console featuring Browser Web Serial ESP32 connectivity, external local backend REST/WebSocket integration, webcam/image defect inspection, and a clearly labeled Demo Mode initialized with 40°C sketch defaults.",
+  "updatedAt":  "2026-10-24T19:24:14.015999698Z",
+  "requestFeedback":  true,
+  "userFacing":  true
+}

@@ -1,0 +1,6 @@
+{
+  "name": "PrintGuard AI — AI + IoT Monitor",
+  "description": "AI-powered 3D-printing monitoring, ESP32 Web Serial telemetry, and computer-vision defect detection dashboard.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
