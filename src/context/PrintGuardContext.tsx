@@ -10,7 +10,9 @@ import React, {
 import {
   DEFAULT_API_BASE_URL,
   DEFAULT_WS_URL,
+  normalizeApiBaseUrl,
   printGuardApi,
+  resolveWsUrl,
 } from '../services/api';
 import {
   AlertEvent,
@@ -155,9 +157,30 @@ function loadStoredSettings(): SystemSettings {
     const raw = window.localStorage.getItem(SETTINGS_STORAGE_KEY);
     if (!raw) return DEFAULT_SETTINGS;
     const parsed = JSON.parse(raw) as Partial<SystemSettings>;
+    const isRemoteHost =
+      typeof window !== 'undefined' &&
+      window.location.hostname !== 'localhost' &&
+      window.location.hostname !== '127.0.0.1';
+
+    let apiBaseUrl = normalizeApiBaseUrl(
+      parsed.apiBaseUrl ?? DEFAULT_SETTINGS.apiBaseUrl
+    );
+    let wsUrl = (parsed.wsUrl ?? DEFAULT_SETTINGS.wsUrl).trim();
+
+    if (isRemoteHost) {
+      if (/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?/i.test(apiBaseUrl)) {
+        apiBaseUrl = '';
+      }
+      if (/^wss?:\/\/(localhost|127\.0\.0\.1)(:\d+)?/i.test(wsUrl)) {
+        wsUrl = '';
+      }
+    }
+
     return {
       ...DEFAULT_SETTINGS,
       ...parsed,
+      apiBaseUrl,
+      wsUrl,
     };
   } catch {
     return DEFAULT_SETTINGS;
@@ -418,8 +441,34 @@ export const PrintGuardProvider: React.FC<{ children: React.ReactNode }> = ({
           addToast(
             'Switched to Live Mode',
             'info',
-            'Demo data cleared. Connect ESP32 via USB Serial or start your local backend.'
+            'Syncing live telemetry from backend...'
           );
+
+          // Immediately pull stored telemetry & history from backend when switching to Live Mode
+          void (async () => {
+            const [histRes, latestRes, alertsRes] = await Promise.allSettled([
+              printGuardApi.getTelemetryHistory(next.apiBaseUrl, '15m'),
+              printGuardApi.getLatestTelemetry(next.apiBaseUrl),
+              printGuardApi.getAlerts(next.apiBaseUrl),
+            ]);
+            if (
+              histRes.status === 'fulfilled' &&
+              histRes.value.length > 0 &&
+              !usbPortRef.current
+            ) {
+              setTelemetryHistory(histRes.value);
+            }
+            if (
+              latestRes.status === 'fulfilled' &&
+              latestRes.value &&
+              !usbPortRef.current
+            ) {
+              setLatestTelemetry(latestRes.value);
+            }
+            if (alertsRes.status === 'fulfilled') {
+              setAlerts(alertsRes.value);
+            }
+          })();
         }
       }
 
@@ -539,24 +588,56 @@ export const PrintGuardProvider: React.FC<{ children: React.ReactNode }> = ({
     [addToast]
   );
 
-  // Initial & periodic backend check when not in Demo Mode
+  // Initial & periodic backend check + Live Mode HTTP telemetry polling fallback
   useEffect(() => {
-    probeBackend(settings.apiBaseUrl, true);
-    if (settings.demoMode) return;
+    void probeBackend(settings.apiBaseUrl, true);
 
-    const interval = window.setInterval(() => {
-      probeBackend(settingsRef.current.apiBaseUrl, true);
-    }, 12000);
-    return () => window.clearInterval(interval);
-  }, [settings.apiBaseUrl, settings.demoMode, probeBackend]);
+    const healthInterval = window.setInterval(
+      () => {
+        void probeBackend(settingsRef.current.apiBaseUrl, true);
+      },
+      settings.demoMode ? 20000 : 10000
+    );
+
+    let telemetryPollInterval: number | null = null;
+    if (!settings.demoMode && !usbConnected) {
+      const pullLatest = async () => {
+        try {
+          const latest = await printGuardApi.getLatestTelemetry(
+            settingsRef.current.apiBaseUrl
+          );
+          if (latest && !usbPortRef.current && !settingsRef.current.demoMode) {
+            ingestTelemetryPoint(latest);
+            setBackendConnected(true);
+            setBackendError(null);
+          }
+        } catch {
+          // Handled silently; health check tracks connectivity status
+        }
+      };
+      void pullLatest();
+      telemetryPollInterval = window.setInterval(() => {
+        void pullLatest();
+      }, 3000);
+    }
+
+    return () => {
+      window.clearInterval(healthInterval);
+      if (telemetryPollInterval) {
+        window.clearInterval(telemetryPollInterval);
+      }
+    };
+  }, [
+    settings.apiBaseUrl,
+    settings.demoMode,
+    usbConnected,
+    probeBackend,
+    ingestTelemetryPoint,
+  ]);
 
   // WebSocket `/ws/live` client with auto-reconnection
   useEffect(() => {
-    const resolvedWsUrl =
-      settings.wsUrl ||
-      (typeof window !== 'undefined'
-        ? `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws/live`
-        : '');
+    const resolvedWsUrl = resolveWsUrl(settings.apiBaseUrl, settings.wsUrl);
 
     if (!resolvedWsUrl) {
       setWsConnected(false);
@@ -613,8 +694,26 @@ export const PrintGuardProvider: React.FC<{ children: React.ReactNode }> = ({
               typeof payload.data === 'object' && payload.data !== null
                 ? (payload.data as Record<string, unknown>)
                 : payload;
-            if (!usbPortRef.current && !settingsRef.current.demoMode) {
-              ingestTelemetryPoint(printGuardApi.normalizeTelemetry(dataObj));
+            const normalized = printGuardApi.normalizeTelemetry(dataObj);
+            if (!usbPortRef.current) {
+              if (settingsRef.current.demoMode && normalized.source !== 'demo') {
+                setSettings((prev) => {
+                  const next = { ...prev, demoMode: false };
+                  try {
+                    window.localStorage.setItem(
+                      SETTINGS_STORAGE_KEY,
+                      JSON.stringify(next)
+                    );
+                  } catch {
+                    // Ignore storage error
+                  }
+                  return next;
+                });
+                setTelemetryHistory([normalized]);
+                setLatestTelemetry(normalized);
+              } else if (!settingsRef.current.demoMode) {
+                ingestTelemetryPoint(normalized);
+              }
             }
           } else if (type === 'vision' || 'detectedClass' in payload) {
             const dataObj =
@@ -678,7 +777,7 @@ export const PrintGuardProvider: React.FC<{ children: React.ReactNode }> = ({
       }
       setWsConnected(false);
     };
-  }, [settings.wsUrl, ingestTelemetryPoint]);
+  }, [settings.apiBaseUrl, settings.wsUrl, ingestTelemetryPoint]);
 
   // Browser Web Serial USB Connect / Disconnect
   const disconnectUsbSerial = useCallback(async () => {

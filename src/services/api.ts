@@ -9,26 +9,48 @@ import {
   VisionHostStatus,
 } from '../types/printguard';
 
-export const DEFAULT_API_BASE_URL =
-  ((import.meta.env.VITE_API_BASE_URL as string | undefined) || '').replace(
-    /\/+$/,
-    ''
-  );
+export function normalizeApiBaseUrl(rawUrl?: string): string {
+  if (!rawUrl) return '';
+  return rawUrl
+    .trim()
+    .replace(/\/+$/, '')
+    .replace(/\/api(?:\/telemetry)?$/i, '');
+}
 
-function computeDefaultWsUrl(): string {
-  const envWs = import.meta.env.VITE_WS_URL as string | undefined;
-  if (envWs) return envWs;
-  if (DEFAULT_API_BASE_URL) {
-    return `${DEFAULT_API_BASE_URL.replace(/^http/, 'ws')}/ws/live`;
+export const DEFAULT_API_BASE_URL = normalizeApiBaseUrl(
+  import.meta.env.VITE_API_BASE_URL as string | undefined
+);
+
+export const DEFAULT_WS_URL = (
+  (import.meta.env.VITE_WS_URL as string | undefined) || ''
+).trim();
+
+export function resolveWsUrl(apiBaseUrl: string, customWsUrl?: string): string {
+  const trimmedWs = (customWsUrl || '').trim();
+  if (trimmedWs) {
+    if (
+      typeof window !== 'undefined' &&
+      window.location.hostname !== 'localhost' &&
+      window.location.hostname !== '127.0.0.1' &&
+      /^ws:\/\/(localhost|127\.0\.0\.1)(:\d+)?/i.test(trimmedWs)
+    ) {
+      // Ignore stale localhost wsUrl persisted in browser storage when running on a live cloud host
+    } else {
+      return trimmedWs;
+    }
   }
+
+  const cleanApi = normalizeApiBaseUrl(apiBaseUrl);
+  if (cleanApi) {
+    return `${cleanApi.replace(/^http/i, 'ws')}/ws/live`;
+  }
+
   if (typeof window !== 'undefined') {
     const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     return `${proto}//${window.location.host}/ws/live`;
   }
   return 'ws://localhost:3000/ws/live';
 }
-
-export const DEFAULT_WS_URL = computeDefaultWsUrl();
 
 export class ApiRequestError extends Error {
   status?: number;
@@ -46,9 +68,9 @@ async function requestJson<T>(
   baseUrl: string,
   path: string,
   options: RequestInit = {},
-  timeoutMs = 6000
+  timeoutMs = 35000
 ): Promise<T> {
-  const cleanBase = baseUrl.replace(/\/+$/, '');
+  const cleanBase = normalizeApiBaseUrl(baseUrl);
   const url = `${cleanBase}${path}`;
   const controller = new AbortController();
   const timer = window.setTimeout(() => controller.abort(), timeoutMs);

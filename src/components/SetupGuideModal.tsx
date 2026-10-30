@@ -82,12 +82,14 @@ npm start`}
               <span>3. Option B — Wireless ESP32 HTTP POST to Built-In Backend</span>
             </div>
             <p className="text-slate-400 mb-1.5 leading-relaxed">
-              Since your sketch already connects to Wi-Fi (<span className="font-mono text-slate-200">&quot;moto g32&quot;</span>), add <span className="font-mono text-slate-200">#include &lt;HTTPClient.h&gt;</span> and call this inside your <span className="font-mono text-slate-200">OLED_INTERVAL</span> block to stream wirelessly:
+              Add <span className="font-mono text-slate-200">#include &lt;WiFiClientSecure.h&gt;</span> and <span className="font-mono text-slate-200">#include &lt;HTTPClient.h&gt;</span> at the top of your sketch, then call this inside your <span className="font-mono text-slate-200">OLED_INTERVAL</span> block to stream wirelessly to Render or local backend:
             </p>
             <pre className="p-3 rounded-md bg-[#060A13] border border-slate-800 font-mono text-[11px] text-slate-200 overflow-x-auto">
 {`if (WiFi.status() == WL_CONNECTED) {
+  WiFiClientSecure client;
+  client.setInsecure(); // Required for https:// Render endpoints
   HTTPClient http;
-  http.begin("${originUrl}/api/telemetry");
+  http.begin(client, "${originUrl}/api/telemetry");
   http.addHeader("Content-Type", "application/json");
   String json = "{\\"temperatureC\\":" + String(temperatureValid ? temperatureC : -999) +
                 ",\\"temperatureValid\\":" + String(temperatureValid ? "true" : "false") +
@@ -97,7 +99,8 @@ npm start`}
                 ",\\"oledAvailable\\":" + String(oledAvailable ? "true" : "false") +
                 ",\\"alertActive\\":" + String(alertActive ? "true" : "false") +
                 ",\\"ipAddress\\":\\"" + WiFi.localIP().toString() + "\\"}";
-  http.POST(json);
+  int httpCode = http.POST(json);
+  Serial.printf("Backend POST status: %d\\n", httpCode);
   http.end();
 }`}
             </pre>
