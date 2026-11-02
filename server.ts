@@ -14,6 +14,11 @@ const __dirname = path.dirname(__filename);
 
 const PORT = Number(process.env.PORT) || 3000;
 const GEMINI_VISION_MODEL = 'gemini-3.8-flash';
+const GEMINI_VISION_FALLBACK_MODELS = [
+  'gemini-3.8-flash',
+  'gemini-flash-latest',
+  'gemini-3.1-flash-lite',
+] as const;
 
 // ---------- Types (Erasable TS for native Node 22 + tsx compatibility) ----------
 interface BoundingBox {
@@ -370,78 +375,109 @@ async function analyzePrintFrameWithGemini(
   const started = Date.now();
   const base64Data = imageBuffer.toString('base64');
 
-  const response = await ai.models.generateContent({
-    model: GEMINI_VISION_MODEL,
-    contents: {
-      parts: [
-        {
-          inlineData: {
-            mimeType: mimeType || 'image/jpeg',
-            data: base64Data,
-          },
-        },
-        {
-          text:
-            'Inspect this 3D printing camera frame for print quality and manufacturing defects. ' +
-            'Classify into exactly one primary class: "Normal", "Spaghetti", "Layer Shift", "Warping", "Stringing", or "Under-Extrusion". ' +
-            'If the image does not show a 3D print defect, classify as "Normal" with isDefect=false. ' +
-            'If a defect is visible, set isDefect=true, provide a realistic confidence percentage (0-100), ' +
-            'a concise 1-2 sentence technical explanation of what is visible, and normalized bounding boxes (x, y, width, height in 0.0-1.0) around defective regions.',
-        },
-      ],
-    },
-    config: {
-      systemInstruction:
-        'You are PrintGuard AI, an industrial computer-vision inspector for FDM/FFF 3D printers. ' +
-        'Be objective and accurate: never invent defects on clean prints or non-defective scenes, and accurately localize tangled filament (Spaghetti), horizontal misalignment (Layer Shift), corner lifting (Warping), fine cobwebs (Stringing), or gaps (Under-Extrusion). Keep explanations concise (under 35 words).',
-      temperature: 0.1,
-      responseMimeType: 'application/json',
-      responseSchema: {
-        type: Type.OBJECT,
-        properties: {
-          detectedClass: {
-            type: Type.STRING,
-            description:
-              'One of: Normal, Spaghetti, Layer Shift, Warping, Stringing, Under-Extrusion.',
-          },
-          confidence: {
-            type: Type.NUMBER,
-            description: 'Confidence score from 0 to 100.',
-          },
-          isDefect: {
-            type: Type.BOOLEAN,
-            description: 'True only if an actual 3D-printing defect is detected.',
-          },
-          explanation: {
-            type: Type.STRING,
-            description: 'Short technical summary of the visual inspection finding.',
-          },
-          boxes: {
-            type: Type.ARRAY,
-            description: 'Normalized bounding boxes (0.0 to 1.0) for detected defects.',
-            items: {
-              type: Type.OBJECT,
-              properties: {
-                label: { type: Type.STRING },
-                confidence: { type: Type.NUMBER },
-                x: { type: Type.NUMBER },
-                y: { type: Type.NUMBER },
-                width: { type: Type.NUMBER },
-                height: { type: Type.NUMBER },
+  let rawText = '';
+  let usedModel: string = GEMINI_VISION_MODEL;
+  let lastError: unknown = null;
+
+  for (let i = 0; i < GEMINI_VISION_FALLBACK_MODELS.length; i++) {
+    const candidateModel = GEMINI_VISION_FALLBACK_MODELS[i];
+    try {
+      const response = await ai.models.generateContent({
+        model: candidateModel,
+        contents: {
+          parts: [
+            {
+              inlineData: {
+                mimeType: mimeType || 'image/jpeg',
+                data: base64Data,
               },
-              required: ['label', 'confidence', 'x', 'y', 'width', 'height'],
             },
+            {
+              text:
+                'Inspect this 3D printing camera frame for print quality and manufacturing defects. ' +
+                'Classify into exactly one primary class: "Normal", "Spaghetti", "Layer Shift", "Warping", "Stringing", or "Under-Extrusion". ' +
+                'If the image does not show a 3D print defect, classify as "Normal" with isDefect=false. ' +
+                'If a defect is visible, set isDefect=true, provide a realistic confidence percentage (0-100), ' +
+                'a concise 1-2 sentence technical explanation of what is visible, and normalized bounding boxes (x, y, width, height in 0.0-1.0) around defective regions.',
+            },
+          ],
+        },
+        config: {
+          systemInstruction:
+            'You are PrintGuard AI, an industrial computer-vision inspector for FDM/FFF 3D printers. ' +
+            'Be objective and accurate: never invent defects on clean prints or non-defective scenes, and accurately localize tangled filament (Spaghetti), horizontal misalignment (Layer Shift), corner lifting (Warping), fine cobwebs (Stringing), or gaps (Under-Extrusion). Keep explanations concise (under 35 words).',
+          temperature: 0.1,
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              detectedClass: {
+                type: Type.STRING,
+                description:
+                  'One of: Normal, Spaghetti, Layer Shift, Warping, Stringing, Under-Extrusion.',
+              },
+              confidence: {
+                type: Type.NUMBER,
+                description: 'Confidence score from 0 to 100.',
+              },
+              isDefect: {
+                type: Type.BOOLEAN,
+                description: 'True only if an actual 3D-printing defect is detected.',
+              },
+              explanation: {
+                type: Type.STRING,
+                description: 'Short technical summary of the visual inspection finding.',
+              },
+              boxes: {
+                type: Type.ARRAY,
+                description: 'Normalized bounding boxes (0.0 to 1.0) for detected defects.',
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    label: { type: Type.STRING },
+                    confidence: { type: Type.NUMBER },
+                    x: { type: Type.NUMBER },
+                    y: { type: Type.NUMBER },
+                    width: { type: Type.NUMBER },
+                    height: { type: Type.NUMBER },
+                  },
+                  required: ['label', 'confidence', 'x', 'y', 'width', 'height'],
+                },
+              },
+            },
+            required: ['detectedClass', 'confidence', 'isDefect', 'explanation', 'boxes'],
           },
         },
-        required: ['detectedClass', 'confidence', 'isDefect', 'explanation', 'boxes'],
-      },
-    },
-  });
+      });
+
+      if (response.text) {
+        rawText = response.text;
+        usedModel = candidateModel;
+        break;
+      }
+    } catch (err) {
+      lastError = err;
+      const errMsg = err instanceof Error ? err.message : String(err);
+      const isTransientDemand =
+        errMsg.includes('503') ||
+        errMsg.includes('UNAVAILABLE') ||
+        errMsg.includes('429') ||
+        errMsg.toLowerCase().includes('high demand') ||
+        errMsg.toLowerCase().includes('overloaded');
+
+      if (!isTransientDemand || i === GEMINI_VISION_FALLBACK_MODELS.length - 1) {
+        throw err;
+      }
+      // Brief pause before trying backup model
+      await new Promise((resolve) => setTimeout(resolve, 600));
+    }
+  }
 
   const latencyMs = Date.now() - started;
-  const rawText = response.text;
   if (!rawText) {
-    throw new Error('Model returned an empty vision inspection response.');
+    throw lastError instanceof Error
+      ? lastError
+      : new Error('Model returned an empty vision inspection response.');
   }
 
   const parsed = JSON.parse(rawText) as {
@@ -467,7 +503,7 @@ async function analyzePrintFrameWithGemini(
     boxes: Array.isArray(parsed.boxes) ? parsed.boxes : [],
     isDefect: Boolean(parsed.isDefect),
     isSimulated: false,
-    modelName: GEMINI_VISION_MODEL,
+    modelName: usedModel,
   };
 
   store.visionEvents = [eventRecord, ...store.visionEvents].slice(0, 40);
