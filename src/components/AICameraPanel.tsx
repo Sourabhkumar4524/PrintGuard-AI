@@ -1,13 +1,15 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   AlertCircle,
+  AlertTriangle,
+  Aperture,
   Camera,
   CameraOff,
   CheckCircle2,
-  Aperture,
   FlaskConical,
   Image as ImageIcon,
   Loader2,
+  Radio,
   ScanSearch,
   Upload,
 } from 'lucide-react';
@@ -48,11 +50,16 @@ export const AICameraPanel: React.FC<AICameraPanelProps> = ({
     settings.demoMode ? DEMO_SAMPLE_IMAGES.normal : null
   );
   const [showingAnnotated, setShowingAnnotated] = useState(true);
+  const [autoScanActive, setAutoScanActive] = useState(false);
   const [demoDefectChoice, setDemoDefectChoice] = useState<
     'Spaghetti' | 'Layer Shift' | 'Warping'
   >('Spaghetti');
 
+  const isAnalyzingRef = useRef(isAnalyzingFrame);
+  isAnalyzingRef.current = isAnalyzingFrame;
+
   const stopWebcam = useCallback(() => {
+    setAutoScanActive(false);
     if (streamRef.current) {
       streamRef.current.getTracks().forEach((track) => track.stop());
       streamRef.current = null;
@@ -199,15 +206,67 @@ export const AICameraPanel: React.FC<AICameraPanelProps> = ({
     const reader = new FileReader();
     reader.onload = () => {
       if (typeof reader.result === 'string') {
+        const rawDataUrl = reader.result;
         if (cameraActive) {
           stopWebcam();
         }
-        setPreviewUrl(reader.result);
-        setSelectedBlob(file);
-        setSelectedFilename(file.name);
-        setShowingAnnotated(false);
-        setCameraError(null);
-        addToast('Image loaded', 'info', `${file.name} ready for analysis.`);
+
+        // Downscale high-resolution images to max 1024px JPEG for fast upload & inference
+        const img = new Image();
+        img.onload = () => {
+          const maxDim = 1024;
+          let targetW = img.naturalWidth || 800;
+          let targetH = img.naturalHeight || 600;
+          if (targetW > maxDim || targetH > maxDim) {
+            const scale = Math.min(maxDim / targetW, maxDim / targetH);
+            targetW = Math.round(targetW * scale);
+            targetH = Math.round(targetH * scale);
+          }
+
+          const canvas = document.createElement('canvas');
+          canvas.width = targetW;
+          canvas.height = targetH;
+          const ctx = canvas.getContext('2d');
+          if (!ctx) {
+            setPreviewUrl(rawDataUrl);
+            setSelectedBlob(file);
+            setSelectedFilename(file.name);
+            setShowingAnnotated(false);
+            setCameraError(null);
+            addToast('Image loaded', 'info', `${file.name} ready for analysis.`);
+            return;
+          }
+
+          ctx.drawImage(img, 0, 0, targetW, targetH);
+          const optimizedDataUrl = canvas.toDataURL('image/jpeg', 0.84);
+          setPreviewUrl(optimizedDataUrl);
+          setShowingAnnotated(false);
+          setCameraError(null);
+
+          canvas.toBlob(
+            (compressedBlob) => {
+              const outName = file.name.replace(/\.(png|jpeg|jpg)$/i, '') + '.jpg';
+              setSelectedBlob(compressedBlob || file);
+              setSelectedFilename(outName);
+              addToast(
+                'Image optimized & loaded',
+                'info',
+                `${outName} ready for fast AI inspection.`
+              );
+            },
+            'image/jpeg',
+            0.84
+          );
+        };
+        img.onerror = () => {
+          setPreviewUrl(rawDataUrl);
+          setSelectedBlob(file);
+          setSelectedFilename(file.name);
+          setShowingAnnotated(false);
+          setCameraError(null);
+          addToast('Image loaded', 'info', `${file.name} ready for analysis.`);
+        };
+        img.src = rawDataUrl;
       }
     };
     reader.readAsDataURL(file);
@@ -236,24 +295,50 @@ export const AICameraPanel: React.FC<AICameraPanelProps> = ({
     [cameraActive, stopWebcam]
   );
 
-  const handleAnalyzeFrame = async () => {
+  const captureLiveVideoBlob = useCallback(async (): Promise<{
+    blob: Blob | null;
+    dataUrl: string | null;
+  }> => {
+    const video = videoRef.current;
+    if (!video || video.readyState < 2) {
+      return { blob: null, dataUrl: null };
+    }
+    const rawW = video.videoWidth || 1280;
+    const rawH = video.videoHeight || 720;
+    const maxDim = 960;
+    const scale = Math.min(1, maxDim / Math.max(rawW, rawH));
+    const width = Math.max(320, Math.round(rawW * scale));
+    const height = Math.max(240, Math.round(rawH * scale));
+
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return { blob: null, dataUrl: null };
+
+    ctx.drawImage(video, 0, 0, width, height);
+    const dataUrl = canvas.toDataURL('image/jpeg', 0.82);
+    const blob = await new Promise<Blob | null>((resolve) =>
+      canvas.toBlob((b) => resolve(b), 'image/jpeg', 0.82)
+    );
+    return { blob, dataUrl };
+  }, []);
+
+  const handleAnalyzeFrame = useCallback(async () => {
+    if (isAnalyzingRef.current) return;
+
     let blobToAnalyze = selectedBlob;
     let currentPreview = previewUrl;
+    let fname = selectedFilename;
 
-    // If webcam is live and user clicks Analyze directly, capture current frame automatically
+    // If webcam is live, grab an optimized live frame directly from the video stream
     if (cameraActive && videoRef.current) {
-      const video = videoRef.current;
-      const canvas = document.createElement('canvas');
-      canvas.width = video.videoWidth || 1280;
-      canvas.height = video.videoHeight || 720;
-      const ctx = canvas.getContext('2d');
-      if (ctx) {
-        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-        currentPreview = canvas.toDataURL('image/jpeg', 0.92);
-        setPreviewUrl(currentPreview);
-        blobToAnalyze = await new Promise<Blob | null>((resolve) =>
-          canvas.toBlob((b) => resolve(b), 'image/jpeg', 0.92)
-        );
+      const captured = await captureLiveVideoBlob();
+      if (captured.blob && captured.dataUrl) {
+        blobToAnalyze = captured.blob;
+        currentPreview = captured.dataUrl;
+        fname = `webcam_live_${Date.now()}.jpg`;
+        setPreviewUrl(captured.dataUrl);
       }
     } else if (!blobToAnalyze && currentPreview) {
       try {
@@ -268,20 +353,74 @@ export const AICameraPanel: React.FC<AICameraPanelProps> = ({
       addToast(
         'No image selected',
         'warning',
-        'Start the webcam and capture a frame, or upload a JPG/PNG image first.'
+        'Start the webcam or upload a JPG/PNG image first.'
       );
       return;
     }
 
     const result = await analyzeFrameBlob(
       blobToAnalyze,
-      selectedFilename,
+      fname,
       currentPreview,
       cameraActive
     );
     if (result) {
       setShowingAnnotated(true);
     }
+  }, [
+    addToast,
+    analyzeFrameBlob,
+    cameraActive,
+    captureLiveVideoBlob,
+    previewUrl,
+    selectedBlob,
+    selectedFilename,
+  ]);
+
+  // Continuous Real-Time Webcam Auto-Scan Loop
+  useEffect(() => {
+    if (!cameraActive || !autoScanActive) return;
+
+    const intervalMs = Math.max(5, settings.cameraIntervalSec || 5) * 1000;
+
+    // Trigger initial scan 1.2s after webcam stream stabilizes
+    const initialTimer = window.setTimeout(() => {
+      if (!isAnalyzingRef.current) {
+        void handleAnalyzeFrame();
+      }
+    }, 1200);
+
+    const loopTimer = window.setInterval(() => {
+      if (!isAnalyzingRef.current) {
+        void handleAnalyzeFrame();
+      }
+    }, intervalMs);
+
+    return () => {
+      window.clearTimeout(initialTimer);
+      window.clearInterval(loopTimer);
+    };
+  }, [autoScanActive, cameraActive, handleAnalyzeFrame, settings.cameraIntervalSec]);
+
+  const handleToggleAutoScan = async () => {
+    if (autoScanActive) {
+      setAutoScanActive(false);
+      addToast('Live Auto-Scan paused', 'info', 'Manual Analyze Frame mode active.');
+      return;
+    }
+
+    if (!cameraActive) {
+      await startWebcam();
+    }
+    setAutoScanActive(true);
+    addToast(
+      'Real-Time Webcam Auto-Scan ON',
+      'success',
+      `Automatically inspecting live webcam frames every ${Math.max(
+        5,
+        settings.cameraIntervalSec || 5
+      )}s.`
+    );
   };
 
   const handleSimulateDefect = async () => {
@@ -384,8 +523,8 @@ export const AICameraPanel: React.FC<AICameraPanelProps> = ({
           </div>
         )}
 
-        {/* Scrim Overlay for Processing */}
-        {isAnalyzingFrame && (
+        {/* Scrim Overlay for Static Image Processing (non-blocking badge used when live webcam is streaming) */}
+        {isAnalyzingFrame && !cameraActive && (
           <div className="absolute inset-0 bg-black/70 flex flex-col items-center justify-center gap-2 z-10">
             <Loader2
               className="w-6 h-6 text-cyan-400 animate-spin"
@@ -397,11 +536,107 @@ export const AICameraPanel: React.FC<AICameraPanelProps> = ({
           </div>
         )}
 
-        {/* Top-left Live / Demo Provenance Scrim */}
+        {/* Live Webcam Bounding Box Overlay */}
+        {cameraActive &&
+          latestVision &&
+          !latestVision.isSimulated &&
+          latestVision.isDefect &&
+          latestVision.boxes &&
+          latestVision.boxes.length > 0 && (
+            <svg
+              className="absolute inset-0 w-full h-full pointer-events-none z-10"
+              viewBox="0 0 100 100"
+              preserveAspectRatio="none"
+            >
+              {latestVision.boxes.map((box, idx) => {
+                const bx = Math.max(0, Math.min(96, box.x * 100));
+                const by = Math.max(0, Math.min(96, box.y * 100));
+                const bw = Math.max(4, Math.min(100 - bx, box.width * 100));
+                const bh = Math.max(4, Math.min(100 - by, box.height * 100));
+                return (
+                  <rect
+                    key={`${box.label}-${idx}`}
+                    x={bx}
+                    y={by}
+                    width={bw}
+                    height={bh}
+                    fill="rgba(244, 63, 94, 0.14)"
+                    stroke="#F43F5E"
+                    strokeWidth="0.6"
+                  />
+                );
+              })}
+            </svg>
+          )}
+
+        {/* Top-left Live Webcam & Auto-Scan Status Badges */}
         {cameraActive && (
-          <div className="absolute top-2.5 left-2.5 flex items-center gap-1.5 px-2 py-1 rounded bg-black/75 border border-emerald-500/40 text-[11px] font-mono text-emerald-300">
-            <span className="w-2 h-2 rounded-full bg-emerald-400" aria-hidden="true" />
-            <span>WEBCAM LIVE</span>
+          <div className="absolute top-2.5 left-2.5 right-2.5 flex flex-wrap items-center justify-between gap-2 pointer-events-none z-20">
+            <div className="flex items-center gap-1.5">
+              <div className="flex items-center gap-1.5 px-2 py-1 rounded bg-black/80 border border-emerald-500/40 text-[11px] font-mono text-emerald-300">
+                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" aria-hidden="true" />
+                <span>WEBCAM LIVE</span>
+              </div>
+              {autoScanActive && (
+                <div className="flex items-center gap-1.5 px-2 py-1 rounded bg-cyan-950/90 border border-cyan-500/50 text-[11px] font-mono text-cyan-200">
+                  <Radio className="w-3 h-3 text-cyan-400 animate-pulse" aria-hidden="true" />
+                  <span>
+                    AUTO-SCAN ({Math.max(5, settings.cameraIntervalSec || 5)}s)
+                  </span>
+                </div>
+              )}
+            </div>
+
+            {isAnalyzingFrame && (
+              <div className="flex items-center gap-1.5 px-2.5 py-1 rounded bg-black/85 border border-cyan-500/40 text-[11px] font-mono text-cyan-300">
+                <Loader2 className="w-3 h-3 animate-spin" aria-hidden="true" />
+                <span>AI SCANNING...</span>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Live Webcam Real-Time AI Verdict HUD */}
+        {cameraActive && latestVision && !latestVision.isSimulated && (
+          <div
+            className={`absolute bottom-0 inset-x-0 px-3 py-2.5 border-t flex flex-wrap items-center justify-between gap-2 text-xs z-20 ${
+              latestVision.isDefect
+                ? 'bg-rose-950/90 border-rose-500/50 text-rose-100'
+                : 'bg-emerald-950/85 border-emerald-500/40 text-emerald-100'
+            }`}
+          >
+            <div className="flex items-center gap-2 min-w-0">
+              {latestVision.isDefect ? (
+                <AlertTriangle
+                  className="w-4 h-4 text-rose-400 shrink-0"
+                  aria-hidden="true"
+                />
+              ) : (
+                <CheckCircle2
+                  className="w-4 h-4 text-emerald-400 shrink-0"
+                  aria-hidden="true"
+                />
+              )}
+              <span className="font-mono font-bold uppercase tracking-wide shrink-0">
+                {latestVision.isDefect
+                  ? `DEFECT: ${latestVision.detectedClass}`
+                  : `NORMAL PRINT`}
+              </span>
+              {latestVision.confidence !== null && (
+                <span className="font-mono text-[11px] tabular-nums opacity-90 shrink-0">
+                  ({latestVision.confidence.toFixed(1)}%)
+                </span>
+              )}
+              <span className="text-[11px] text-slate-200 truncate hidden sm:inline">
+                — {latestVision.explanation}
+              </span>
+            </div>
+            <span className="font-mono text-[11px] tabular-nums text-slate-300 shrink-0">
+              {latestVision.latencyMs ? `${latestVision.latencyMs}ms · ` : ''}
+              {new Date(latestVision.timestamp).toLocaleTimeString([], {
+                hour12: false,
+              })}
+            </span>
           </div>
         )}
 
@@ -483,6 +718,25 @@ export const AICameraPanel: React.FC<AICameraPanelProps> = ({
             <span>Stop Webcam</span>
           </button>
         )}
+
+        <button
+          type="button"
+          onClick={() => void handleToggleAutoScan()}
+          disabled={startingCamera}
+          className={`inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold rounded-md border transition-colors whitespace-nowrap shrink-0 ${
+            autoScanActive
+              ? 'bg-emerald-950/70 hover:bg-emerald-900/70 text-emerald-200 border-emerald-500/50'
+              : 'bg-slate-800 hover:bg-slate-700 text-cyan-300 border-cyan-500/30'
+          }`}
+        >
+          <Radio
+            className={`w-3.5 h-3.5 shrink-0 ${
+              autoScanActive ? 'text-emerald-400 animate-pulse' : 'text-cyan-400'
+            }`}
+            aria-hidden="true"
+          />
+          <span>{autoScanActive ? 'Auto-Scan: ON' : 'Auto-Scan Live'}</span>
+        </button>
 
         <button
           type="button"
