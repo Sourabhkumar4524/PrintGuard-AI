@@ -363,12 +363,12 @@ export const PrintGuardProvider: React.FC<{ children: React.ReactNode }> = ({
                 2
               )} m/s²) exceeded ${cfg.vibrationWarningMs2.toFixed(
                 2
-              )} m/s² display threshold. Physical alarm not triggered.`
+              )} m/s² threshold. Red LED & Buzzer active.`
             : `MPU6050 vibration (${point.vibrationMs2.toFixed(
                 2
               )} m/s²) exceeded ${cfg.vibrationWarningMs2.toFixed(
                 2
-              )} m/s² threshold.`,
+              )} m/s² threshold. Red LED & Buzzer active.`,
           isSimulated: isSim || point.vibrationSimulated,
         });
       }

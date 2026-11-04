@@ -99,7 +99,7 @@ export function generateInitialDemoHistory(count = 36): TelemetryPoint[] {
       servoAngleDeg: servoAngle,
       servoVerified: false, // Unverified in demo mode per prompt specification
       oledVerified: false,
-      alertActive: tempWave >= 40.0,
+      alertActive: tempWave >= 40.0 || vibWave >= 1.0,
       wifiConnected: true,
       ipAddress: '192.168.43.108 (Demo)',
       wifiSsid: 'moto g32 (Demo)',
@@ -146,7 +146,7 @@ export function generateNextDemoPoint(
     servoAngleDeg: servoAngle,
     servoVerified: false,
     oledVerified: false,
-    alertActive: tempRounded >= tempThresholdC,
+    alertActive: tempRounded >= tempThresholdC || vibRounded >= 1.0,
     wifiConnected: true,
     ipAddress: '192.168.43.108 (Demo)',
     wifiSsid: 'moto g32 (Demo)',

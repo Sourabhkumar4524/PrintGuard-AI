@@ -7,7 +7,6 @@ import multer from 'multer';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { WebSocket, WebSocketServer } from 'ws';
-import { GoogleGenAI, Type } from '@google/genai';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -154,6 +153,10 @@ let activeSerialPortPath: string | null = null;
 let activeSerialStream: fs.ReadStream | null = null;
 let lastEsp32PacketMs = 0;
 
+// Closed-loop AI Vision -> ESP32 physical alarm state
+let activeVisionAlert = false;
+let activeVisionClass = 'Normal';
+
 let saveTimer: NodeJS.Timeout | null = null;
 function schedulePersist(): void {
   if (saveTimer) return;
@@ -170,13 +173,19 @@ function schedulePersist(): void {
   }, 400);
 }
 
-// ---------- Gemini Client Initialization ----------
-function getGeminiClient(): GoogleGenAI | null {
+// ---------- Lazy Gemini Client Initialization ----------
+let genaiModulePromise: Promise<typeof import('@google/genai')> | null = null;
+
+async function getGeminiRuntime() {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey || apiKey === 'MY_GEMINI_API_KEY') {
     return null;
   }
-  return new GoogleGenAI({
+  if (!genaiModulePromise) {
+    genaiModulePromise = import('@google/genai');
+  }
+  const { GoogleGenAI, Type } = await genaiModulePromise;
+  const ai = new GoogleGenAI({
     apiKey,
     httpOptions: {
       headers: {
@@ -184,6 +193,7 @@ function getGeminiClient(): GoogleGenAI | null {
       },
     },
   });
+  return { ai, Type };
 }
 
 // ---------- Express & HTTP + WebSocket Setup ----------
@@ -294,7 +304,11 @@ function ingestServerTelemetry(raw: Record<string, unknown>): TelemetryRecord {
     alertActive: Boolean(
       raw.alertActive ??
         raw.alert_active ??
-        (tempValid && tempVal !== null && tempVal >= store.settings.tempWarningC)
+        ((tempValid && tempVal !== null && tempVal >= store.settings.tempWarningC) ||
+          (vibVal !== null &&
+            !Number.isNaN(vibVal) &&
+            vibVal >= store.settings.vibrationWarningMs2) ||
+          activeVisionAlert)
     ),
     wifiConnected: Boolean(raw.wifiConnected ?? raw.wifi_connected ?? true),
     ipAddress:
@@ -365,12 +379,13 @@ async function analyzePrintFrameWithGemini(
   imageBuffer: Buffer,
   mimeType: string
 ): Promise<VisionEventRecord> {
-  const ai = getGeminiClient();
-  if (!ai) {
+  const runtime = await getGeminiRuntime();
+  if (!runtime) {
     throw new Error(
       'GEMINI_API_KEY is not configured on the server. Configure GEMINI_API_KEY in Settings > Secrets.'
     );
   }
+  const { ai, Type } = runtime;
 
   const started = Date.now();
   const base64Data = imageBuffer.toString('base64');
@@ -394,18 +409,22 @@ async function analyzePrintFrameWithGemini(
             },
             {
               text:
-                'Inspect this 3D printing camera frame for print quality and manufacturing defects. ' +
+                'Inspect this 3D printing / turntable prototype camera frame for surface quality and filament defects. ' +
+                'Focus on the primary foreground part, 3D model, or rotating wheel being inspected (ignore normal background breadboards, electronics, or hands outside the part). ' +
                 'Classify into exactly one primary class: "Normal", "Spaghetti", "Layer Shift", "Warping", "Stringing", or "Under-Extrusion". ' +
-                'If the image does not show a 3D print defect, classify as "Normal" with isDefect=false. ' +
-                'If a defect is visible, set isDefect=true, provide a realistic confidence percentage (0-100), ' +
-                'a concise 1-2 sentence technical explanation of what is visible, and normalized bounding boxes (x, y, width, height in 0.0-1.0) around defective regions.',
+                'IMPORTANT PROTOTYPE & FILAMENT RULES: ' +
+                '1) If ANY loose threads, strings, yarn, fine strands, cobweb fibers, or tangled wire/filament loops are lying ON, draped across spokes/gaps, or hanging from the inspected part/wheel/model: classify thin/few strands as "Stringing" (isDefect=true) and bunched/looped/tangled strands as "Spaghetti" (isDefect=true). ' +
+                '2) If the part shows peeled/lifted edges, shifted layers, or missing extrusion gaps, classify as "Warping", "Layer Shift", or "Under-Extrusion" (isDefect=true). ' +
+                '3) Only classify as "Normal" (isDefect=false) when the inspected model/wheel/print surface itself is clean and free of loose threads, tangles, or structural defects. ' +
+                'Provide confidence as a percentage (0-100), a concise 1-2 sentence industrial inspection summary, and normalized bounding boxes (x, y, width, height in 0.0-1.0) tightly around the threads/tangles/defective regions on the part.',
             },
           ],
         },
         config: {
           systemInstruction:
-            'You are PrintGuard AI, an industrial computer-vision inspector for FDM/FFF 3D printers. ' +
-            'Be objective and accurate: never invent defects on clean prints or non-defective scenes, and accurately localize tangled filament (Spaghetti), horizontal misalignment (Layer Shift), corner lifting (Warping), fine cobwebs (Stringing), or gaps (Under-Extrusion). Keep explanations concise (under 35 words).',
+            'You are PrintGuard AI, an industrial computer-vision inspector for FDM/FFF 3D printers and rotary turntable inspection rigs. ' +
+            'Treat any physical threads, yarn, loose fibers, or tangled strands placed on or across the inspected part/wheel as real filament extrusion defects ("Stringing" for individual/bridging threads across spokes or gaps; "Spaghetti" for tangled bundles or messy loops), and describe them using professional 3D-printing terminology. ' +
+            'Ignore background jumper wires on breadboards that are not touching the inspected model. When the inspected model itself is clean and unobstructed, return "Normal" with isDefect=false. Keep explanations under 35 words.',
           temperature: 0.1,
           responseMimeType: 'application/json',
           responseSchema: {
@@ -418,11 +437,12 @@ async function analyzePrintFrameWithGemini(
               },
               confidence: {
                 type: Type.NUMBER,
-                description: 'Confidence score from 0 to 100.',
+                description: 'Confidence score percentage from 0 to 100 (e.g. 92).',
               },
               isDefect: {
                 type: Type.BOOLEAN,
-                description: 'True only if an actual 3D-printing defect is detected.',
+                description:
+                  'True whenever threads, tangles, stringing, spaghetti, warping, layer shift, or under-extrusion are visible on the inspected part.',
               },
               explanation: {
                 type: Type.STRING,
@@ -488,20 +508,34 @@ async function analyzePrintFrameWithGemini(
     boxes?: BoundingBox[];
   };
 
-  const confidenceClamped = Math.min(
-    100,
-    Math.max(0, Number(parsed.confidence ?? 0))
-  );
+  const rawConf = Number(parsed.confidence ?? 0);
+  const normalizedConf = rawConf > 0 && rawConf <= 1 ? rawConf * 100 : rawConf;
+  const confidenceClamped = Math.min(100, Math.max(0, normalizedConf));
+  const resolvedClass = (parsed.detectedClass || 'Normal').trim();
+  const resolvedIsDefect =
+    Boolean(parsed.isDefect) || resolvedClass.toLowerCase() !== 'normal';
+
+  const normalizedBoxes = Array.isArray(parsed.boxes)
+    ? parsed.boxes.map((b) => {
+        const bConf = Number(b.confidence ?? confidenceClamped);
+        return {
+          ...b,
+          confidence: Number(
+            (bConf > 0 && bConf <= 1 ? bConf * 100 : bConf).toFixed(1)
+          ),
+        };
+      })
+    : [];
 
   const eventRecord: VisionEventRecord = {
     id: `vis-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
     timestamp: new Date().toISOString(),
-    detectedClass: parsed.detectedClass || 'Normal',
+    detectedClass: resolvedClass,
     confidence: Number(confidenceClamped.toFixed(1)),
     latencyMs,
     explanation: parsed.explanation || 'Frame analyzed successfully.',
-    boxes: Array.isArray(parsed.boxes) ? parsed.boxes : [],
-    isDefect: Boolean(parsed.isDefect),
+    boxes: normalizedBoxes,
+    isDefect: resolvedIsDefect,
     isSimulated: false,
     modelName: usedModel,
   };
@@ -516,6 +550,8 @@ async function analyzePrintFrameWithGemini(
   if (eventRecord.isDefect) {
     store.stats.defectsDetected += 1;
     if ((eventRecord.confidence ?? 0) >= store.settings.aiConfidenceThreshold) {
+      activeVisionAlert = true;
+      activeVisionClass = eventRecord.detectedClass;
       recordAlertWithCooldown(`vision-${eventRecord.detectedClass}`, {
         title: `AI detected ${eventRecord.detectedClass}`,
         severity: 'critical',
@@ -524,10 +560,17 @@ async function analyzePrintFrameWithGemini(
         isSimulated: false,
       });
     }
+  } else {
+    // Healthy Normal frame clears the active vision alarm latch
+    activeVisionAlert = false;
+    activeVisionClass = 'Normal';
   }
 
   schedulePersist();
-  broadcastWs({ type: 'vision', data: eventRecord });
+  broadcastWs({
+    type: 'vision',
+    data: { ...eventRecord, visionAlertActive: activeVisionAlert },
+  });
   return eventRecord;
 }
 
@@ -739,15 +782,23 @@ app.post('/api/serial/disconnect', (_req: Request, res: Response) => {
   res.json({ connected: false });
 });
 
-// 7. POST /api/telemetry & /api/esp32/telemetry (ESP32 Wi-Fi HTTP & USB Bridge Ingestion)
+// 7. POST /api/telemetry & /api/esp32/telemetry (ESP32 Wi-Fi HTTP & USB Bridge Ingestion + Closed-Loop Alarm Command)
 app.post('/api/telemetry', (req: Request, res: Response) => {
   const point = ingestServerTelemetry((req.body || {}) as Record<string, unknown>);
-  res.status(201).json(point);
+  res.status(201).json({
+    ...point,
+    visionAlertActive: activeVisionAlert,
+    visionDetectedClass: activeVisionClass,
+  });
 });
 
 app.post('/api/esp32/telemetry', (req: Request, res: Response) => {
   const point = ingestServerTelemetry((req.body || {}) as Record<string, unknown>);
-  res.status(201).json(point);
+  res.status(201).json({
+    ...point,
+    visionAlertActive: activeVisionAlert,
+    visionDetectedClass: activeVisionClass,
+  });
 });
 
 // 8. GET /api/telemetry/latest
@@ -903,6 +954,8 @@ app.get('/api/alerts', (_req: Request, res: Response) => {
 
 app.delete('/api/alerts', (_req: Request, res: Response) => {
   store.alerts = [];
+  activeVisionAlert = false;
+  activeVisionClass = 'Normal';
   schedulePersist();
   broadcastWs({ type: 'alerts_cleared' });
   res.json({ cleared: true });
@@ -920,6 +973,16 @@ app.post('/api/alerts/:alert_id/acknowledge', (req: Request, res: Response) => {
     }
     return a;
   });
+
+  if (updated && (updated as AlertRecord).category === 'vision') {
+    const anyUnackedVision = store.alerts.some(
+      (a) => a.category === 'vision' && !a.acknowledged
+    );
+    if (!anyUnackedVision) {
+      activeVisionAlert = false;
+      activeVisionClass = 'Normal';
+    }
+  }
 
   schedulePersist();
   if (updated) {
@@ -996,12 +1059,44 @@ async function startServer(): Promise<void> {
     process.env.npm_lifecycle_event === 'start';
 
   if (!isProd) {
-    const { createServer: createViteServer } = await import('vite');
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: 'spa',
+    let resolveVite!: (vite: Awaited<ReturnType<typeof import('vite')['createServer']>>) => void;
+    let rejectVite!: (err: unknown) => void;
+    const vitePromise = new Promise<
+      Awaited<ReturnType<typeof import('vite')['createServer']>>
+    >((resolve, reject) => {
+      resolveVite = resolve;
+      rejectVite = reject;
     });
-    app.use(vite.middlewares);
+
+    app.use((req: Request, res: Response, next) => {
+      vitePromise
+        .then((vite) => {
+          vite.middlewares(req, res, next);
+        })
+        .catch((err) => {
+          next(err);
+        });
+    });
+
+    httpServer.listen(PORT, '0.0.0.0', () => {
+      console.log(`PrintGuard AI Full-Stack Server listening on http://0.0.0.0:${PORT}`);
+      // Load Vite immediately after TCP port 3000 is open so health checks succeed instantaneously
+      import('vite')
+        .then(({ createServer: createViteServer }) =>
+          createViteServer({
+            server: {
+              middlewareMode: true,
+              hmr:
+                process.env.DISABLE_HMR === 'true'
+                  ? false
+                  : { server: httpServer },
+            },
+            appType: 'spa',
+          })
+        )
+        .then(resolveVite)
+        .catch(rejectVite);
+    });
   } else {
     app.use(express.static(distPath));
     app.get('*', (req: Request, res: Response, next) => {
@@ -1011,11 +1106,11 @@ async function startServer(): Promise<void> {
       }
       res.sendFile(path.join(distPath, 'index.html'));
     });
-  }
 
-  httpServer.listen(PORT, '0.0.0.0', () => {
-    console.log(`PrintGuard AI Full-Stack Server listening on http://0.0.0.0:${PORT}`);
-  });
+    httpServer.listen(PORT, '0.0.0.0', () => {
+      console.log(`PrintGuard AI Full-Stack Server listening on http://0.0.0.0:${PORT}`);
+    });
+  }
 }
 
 void startServer();

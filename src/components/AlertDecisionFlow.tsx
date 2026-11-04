@@ -155,7 +155,7 @@ export const AlertDecisionFlow: React.FC = () => {
           <p className="text-[11px] text-slate-400 leading-relaxed">
             Logs event in timeline; ESP32 drives{' '}
             <span className="font-mono text-slate-300">RED_LED (27)</span> &amp;{' '}
-            <span className="font-mono text-slate-300">BUZZER (25)</span> HIGH strictly on thermal breach.
+            <span className="font-mono text-slate-300">BUZZER (25)</span> HIGH on thermal, vibration, or CV defect alert.
           </p>
         </div>
       </div>

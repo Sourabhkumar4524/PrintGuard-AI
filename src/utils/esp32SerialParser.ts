@@ -167,9 +167,15 @@ export function parseEsp32SerialLine(
     return null;
   }
 
-  // Temperature alert: ON | OFF
-  if (line.startsWith('Temperature alert:')) {
-    const val = line.replace('Temperature alert:', '').trim().toUpperCase();
+  // Temperature alert: ON | OFF  OR  Hardware alert: ON | OFF
+  if (
+    line.startsWith('Temperature alert:') ||
+    line.startsWith('Hardware alert:')
+  ) {
+    const val = line
+      .replace(/^(Temperature|Hardware) alert:/, '')
+      .trim()
+      .toUpperCase();
     acc.alertActive = val === 'ON' || val === '1' || val === 'TRUE';
     acc.hasStatusFields = true;
     return null;
@@ -257,18 +263,18 @@ export const ESP32_PINOUT_MAPPING = [
     component: 'Green Status LED',
     gpio: 'GPIO 26 (GREEN_LED)',
     protocol: 'Digital Output',
-    role: 'HIGH during normal operation (< 40.0 °C)',
+    role: 'HIGH during normal operation (no thermal, vibration, or AI defect alert)',
   },
   {
     component: 'Red Alert LED',
     gpio: 'GPIO 27 (RED_LED)',
     protocol: 'Digital Output',
-    role: 'HIGH when temperatureC >= 40.0 °C',
+    role: 'HIGH on temp >= 40.0 °C, vibration >= 1.00 m/s², or AI camera defect',
   },
   {
     component: 'Active Buzzer',
     gpio: 'GPIO 25 (BUZZER_PIN)',
     protocol: 'Digital Output',
-    role: 'HIGH audible alarm on thermal threshold breach',
+    role: 'HIGH audible alarm on thermal, vibration, or AI defect alert',
   },
 ];

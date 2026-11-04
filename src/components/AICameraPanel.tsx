@@ -305,7 +305,7 @@ export const AICameraPanel: React.FC<AICameraPanelProps> = ({
     }
     const rawW = video.videoWidth || 1280;
     const rawH = video.videoHeight || 720;
-    const maxDim = 960;
+    const maxDim = 1120;
     const scale = Math.min(1, maxDim / Math.max(rawW, rawH));
     const width = Math.max(320, Math.round(rawW * scale));
     const height = Math.max(240, Math.round(rawH * scale));
@@ -317,9 +317,9 @@ export const AICameraPanel: React.FC<AICameraPanelProps> = ({
     if (!ctx) return { blob: null, dataUrl: null };
 
     ctx.drawImage(video, 0, 0, width, height);
-    const dataUrl = canvas.toDataURL('image/jpeg', 0.82);
+    const dataUrl = canvas.toDataURL('image/jpeg', 0.88);
     const blob = await new Promise<Blob | null>((resolve) =>
-      canvas.toBlob((b) => resolve(b), 'image/jpeg', 0.82)
+      canvas.toBlob((b) => resolve(b), 'image/jpeg', 0.88)
     );
     return { blob, dataUrl };
   }, []);
