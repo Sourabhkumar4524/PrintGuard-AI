@@ -383,7 +383,7 @@ export const printGuardApi = {
         method: 'POST',
         body: formData,
       },
-      60000
+      75000
     );
     return normalizeVisionResult(raw);
   },
@@ -404,7 +404,7 @@ export const printGuardApi = {
         method: 'POST',
         body: formData,
       },
-      60000
+      75000
     );
     return normalizeVisionResult(raw);
   },

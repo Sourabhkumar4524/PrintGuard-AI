@@ -366,10 +366,14 @@ export const AICameraPanel: React.FC<AICameraPanelProps> = ({
     );
     if (result) {
       setShowingAnnotated(true);
+    } else if (autoScanActive) {
+      // Pause auto-scan on upstream error so user isn't spammed with error toasts
+      setAutoScanActive(false);
     }
   }, [
     addToast,
     analyzeFrameBlob,
+    autoScanActive,
     cameraActive,
     captureLiveVideoBlob,
     previewUrl,

@@ -12,11 +12,12 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const PORT = Number(process.env.PORT) || 3000;
-const GEMINI_VISION_MODEL = 'gemini-3.8-flash';
+const GEMINI_VISION_MODEL = 'gemini-3.1-flash-lite';
+let currentPreferredVisionModel = 'gemini-3.1-flash-lite';
 const GEMINI_VISION_FALLBACK_MODELS = [
-  'gemini-3.8-flash',
-  'gemini-flash-latest',
   'gemini-3.1-flash-lite',
+  'gemini-flash-latest',
+  'gemini-3.8-flash',
 ] as const;
 
 // ---------- Types (Erasable TS for native Node 22 + tsx compatibility) ----------
@@ -391,13 +392,18 @@ async function analyzePrintFrameWithGemini(
   const base64Data = imageBuffer.toString('base64');
 
   let rawText = '';
-  let usedModel: string = GEMINI_VISION_MODEL;
+  let usedModel: string = currentPreferredVisionModel;
   let lastError: unknown = null;
 
-  for (let i = 0; i < GEMINI_VISION_FALLBACK_MODELS.length; i++) {
-    const candidateModel = GEMINI_VISION_FALLBACK_MODELS[i];
+  const candidateModels = [
+    currentPreferredVisionModel,
+    ...GEMINI_VISION_FALLBACK_MODELS.filter((m) => m !== currentPreferredVisionModel),
+  ];
+
+  for (let i = 0; i < candidateModels.length; i++) {
+    const candidateModel = candidateModels[i];
     try {
-      const response = await ai.models.generateContent({
+      const generatePromise = ai.models.generateContent({
         model: candidateModel,
         contents: {
           parts: [
@@ -470,9 +476,20 @@ async function analyzePrintFrameWithGemini(
         },
       });
 
+      // Bound each individual model attempt to 9s so slow/stalled models fail over quickly
+      const timeoutPromise = new Promise<never>((_, reject) =>
+        setTimeout(
+          () => reject(new Error(`Model ${candidateModel} response timed out after 9000ms`)),
+          9000
+        )
+      );
+
+      const response = await Promise.race([generatePromise, timeoutPromise]);
+
       if (response.text) {
         rawText = response.text;
         usedModel = candidateModel;
+        currentPreferredVisionModel = candidateModel;
         break;
       }
     } catch (err) {
@@ -482,14 +499,15 @@ async function analyzePrintFrameWithGemini(
         errMsg.includes('503') ||
         errMsg.includes('UNAVAILABLE') ||
         errMsg.includes('429') ||
+        errMsg.includes('timed out') ||
         errMsg.toLowerCase().includes('high demand') ||
         errMsg.toLowerCase().includes('overloaded');
 
-      if (!isTransientDemand || i === GEMINI_VISION_FALLBACK_MODELS.length - 1) {
+      if (!isTransientDemand || i === candidateModels.length - 1) {
         throw err;
       }
       // Brief pause before trying backup model
-      await new Promise((resolve) => setTimeout(resolve, 600));
+      await new Promise((resolve) => setTimeout(resolve, 300));
     }
   }
 

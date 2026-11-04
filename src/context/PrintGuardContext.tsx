@@ -1225,6 +1225,12 @@ export const PrintGuardProvider: React.FC<{ children: React.ReactNode }> = ({
           err instanceof Error
             ? err.message
             : 'Vision backend could not be reached.';
+        const isDemandSpike =
+          msg.includes('503') ||
+          msg.toLowerCase().includes('high demand') ||
+          msg.toLowerCase().includes('unavailable') ||
+          msg.includes('timed out');
+
         setVisionStatus((prev) => ({
           ...prev,
           online: false,
@@ -1232,11 +1238,15 @@ export const PrintGuardProvider: React.FC<{ children: React.ReactNode }> = ({
           lastChecked: new Date().toISOString(),
           errorMessage: msg,
         }));
-        addToast(
-          'AI Vision backend unavailable',
-          'error',
-          `${msg}. Start your local server or use "Simulate Defect (Demo)" in Demo Mode.`
-        );
+
+        const title = isDemandSpike
+          ? 'AI Vision Temporary Cloud Spike'
+          : 'AI Vision backend unavailable';
+        const description = isDemandSpike
+          ? 'Gemini Vision free-tier is experiencing a temporary Google Cloud demand spike. Try Analyze Frame again in a few seconds, or use "Simulate Defect (Demo)".'
+          : `${msg}. Verify your connection or use "Simulate Defect (Demo)" in Demo Mode.`;
+
+        addToast(title, 'error', description);
         return null;
       } finally {
         setIsAnalyzingFrame(false);
